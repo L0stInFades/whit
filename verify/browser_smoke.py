@@ -153,17 +153,17 @@ def address(expected):
 
 def search_address(search_url, query):
     target = urlsplit(search_url)
-    hosts = {target.netloc, "cn.bing.com"} if target.netloc == "www.bing.com" else {target.netloc}
 
     def matches():
         box = element("地址", "Edit")
         if box is None:
             return False
         url = urlsplit(box.get_value())
-        return (url.scheme == target.scheme and url.netloc in hosts and url.path == target.path
+        return ((url.scheme, url.netloc, url.path) == (target.scheme, target.netloc, target.path)
                 and parse_qs(url.query).get(target.query[:-1]) == [query])
 
     until(matches, search_url)
+    until(lambda: element("刷新", "Button"), "search navigation finished")
 
 
 def browser():
@@ -357,6 +357,9 @@ if __name__ == "__main__":
         value = winreg.QueryValueEx(key, "{374DE290-123F-4565-9164-39C4925E467B}")[0]
     download = Path(os.path.expandvars(value)) / filename
     server = ThreadingHTTPServer(("127.0.0.1", 0), Site)
+    # Keep search URL checks independent of regional redirects. Chromium bypasses the proxy for loopback.
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+        os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "") + f" --proxy-server=127.0.0.1:{server.server_port}")
     base = f"http://127.0.0.1:{server.server_port}/{marker}"
     Thread(target=server.serve_forever, daemon=True).start()
     proc = None
