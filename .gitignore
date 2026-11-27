@@ -1,0 +1,11 @@
+/.deps/
+/bin/
+/obj/
+/dist/
+/.vs/
+__pycache__/
+*.py[cod]
+*.user
+*.pfx
+*.p12
+*.key

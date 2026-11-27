@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>15.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWinUI>true</UseWinUI>
+    <PublishAot>true</PublishAot>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ProjectPriIndexName>whit.browser</ProjectPriIndexName>
+    <ProjectPriFileName>resources.pri</ProjectPriFileName>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <DefaultItemExcludes>$(DefaultItemExcludes);.deps/**;dist/**;verify/**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.7.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.7.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4370.26" />
+  </ItemGroup>
+  <Target Name="PublishResources" AfterTargets="Publish">
+    <Copy SourceFiles="$(TargetDir)resources.pri;$(TargetDir)App.xbf" DestinationFolder="$(PublishDir)" />
+  </Target>
+</Project>
