@@ -27,7 +27,7 @@ sealed partial class Browser
     const string Shield = "\uEA18";
     const string Search = "\uE721";
 
-    readonly Grid root = new();
+    readonly Grid root = new() { KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden };
     readonly Grid webHost = new();
     readonly Grid startPage = new() { Visibility = Visibility.Collapsed };
     readonly TabView tabs = new()
@@ -36,11 +36,11 @@ sealed partial class Browser
         Padding = new(4, 4, 0, 0),
         TabWidthMode = TabViewWidthMode.Equal,
         CloseButtonOverlayMode = TabViewCloseButtonOverlayMode.OnPointerOver,
-        CanDragTabs = true, CanReorderTabs = true, AllowDropTabs = true,
+        CanTearOutTabs = true, CanReorderTabs = true,
     };
-    readonly TextBox address = new()
+    readonly AutoSuggestBox address = new()
     {
-        MinWidth = 0, MaxLength = 8192, FlowDirection = FlowDirection.LeftToRight,
+        MinWidth = 0, FlowDirection = FlowDirection.LeftToRight,
         VerticalAlignment = VerticalAlignment.Center,
     };
     readonly AutoSuggestBox startSearch = new()
@@ -53,6 +53,11 @@ sealed partial class Browser
     readonly Button reload = Button("\uE72C", "刷新");
     readonly Button site = Button(Search, "搜索");
     readonly Button star = Button("\uE734", "添加书签");
+    readonly TextBlock zoom = new()
+    {
+        Visibility = Visibility.Collapsed, VerticalAlignment = VerticalAlignment.Center,
+        TextAlignment = TextAlignment.Center, MinWidth = 38, FontSize = 12,
+    };
     readonly Border privateLabel = new() { Visibility = Visibility.Collapsed };
     readonly TextBlock wordmark = new()
     {
@@ -63,8 +68,12 @@ sealed partial class Browser
     readonly SolidColorBrush clear = new(Microsoft.UI.Colors.Transparent);
     readonly SolidColorBrush canvas = new(), ink = new(), muted = new();
 
+    TextBox? AddressEditor => VisualTreeHelper.GetChildrenCount(address) > 0 &&
+        VisualTreeHelper.GetChild(address, 0) is Grid template ? template.Children.OfType<TextBox>().FirstOrDefault() : null;
+
     void ConfigureChrome()
     {
+        tabs.Resources["TabViewItemHeaderIconSize"] = 20d;
         SystemBackdrop = DesktopAcrylicController.IsSupported() ? new NeutralAcrylic() : new DesktopAcrylicBackdrop();
         var more = Button("\uE712", "菜单");
         more.Flyout = Menu();
@@ -73,16 +82,22 @@ sealed partial class Browser
         back.Click += (_, _) => { if (ActiveTab?.Core is { CanGoBack: true } web) web.GoBack(); };
         forward.Click += (_, _) => { if (ActiveTab?.Core is { CanGoForward: true } web) web.GoForward(); };
         reload.Click += (_, _) => Reload();
-        site.Click += (_, _) => { if (ActiveTab?.Url is null) FocusAddress(); else ShowSite(); };
+        site.Click += (_, _) =>
+        {
+            if (ActiveTab?.Url?.Scheme is "http" or "https") ShowSite();
+            else FocusAddress();
+        };
         star.Click += (_, _) => ToggleBookmark();
 
         AutomationProperties.SetName(address, "地址");
-        var addressField = Columns(new(40), new(1, GridUnitType.Star), new(40));
+        AutomationProperties.SetLiveSetting(zoom, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
+        var addressField = Columns(new(40), new(1, GridUnitType.Star), GridLength.Auto, new(40));
         addressField.Height = AddressHeight;
         addressField.VerticalAlignment = VerticalAlignment.Center;
         Place(addressField, site, 0);
         Place(addressField, address, 1);
-        Place(addressField, star, 2);
+        Place(addressField, zoom, 2);
+        Place(addressField, star, 3);
         var toolbar = Columns(GridLength.Auto, GridLength.Auto, GridLength.Auto,
             new(1, GridUnitType.Star), GridLength.Auto, GridLength.Auto);
         toolbar.Height = 44;
@@ -111,24 +126,55 @@ sealed partial class Browser
 
         tabs.AddTabButtonClick += (_, _) => AddTab(focus: true);
         tabs.TabCloseRequested += (_, e) => CloseTab(documents[e.Tab]);
+        tabs.TabTearOutWindowRequested += (_, e) =>
+        {
+            app.TearOutWindow = app.OpenWindow(forTearOut: true);
+            e.NewWindowId = app.TearOutWindow.AppWindow.Id;
+        };
+        tabs.TabTearOutRequested += (_, e) =>
+        {
+            if (app.TearOutWindow is { } target && e.Items[0] is TabViewItem item)
+                MoveTab(item, target, 0);
+        };
+        tabs.ExternalTornOutTabsDropping += (_, e) =>
+            e.AllowDrop = e.Items[0] is TabViewItem item && app.Windows.Any(w => w != this && w.documents.ContainsKey(item));
+        tabs.ExternalTornOutTabsDropped += (_, e) =>
+        {
+            if (e.Items[0] is not TabViewItem item) return;
+            var source = app.Windows.First(w => w.documents.ContainsKey(item));
+            app.TearOutWindow = source;
+            source.MoveTab(item, this, e.DropIndex);
+        };
+        Tab? shown = null;
         tabs.SelectionChanged += (_, _) =>
         {
-            foreach (var tab in documents.Values)
-                tab.Web.Visibility = tab == ActiveTab ? Visibility.Visible : Visibility.Collapsed;
+            if (shown?.Owner == this && shown.Web is { } previous) previous.Visibility = Visibility.Collapsed;
+            shown = ActiveTab;
+            if (shown?.Web is { } view) view.Visibility = Visibility.Visible;
             startSearch.Text = "";
             notice.IsOpen = false;
             Refresh(true);
+            LoadSelected();
         };
-        address.KeyDown += async (_, e) =>
+        address.Loaded += (_, _) =>
         {
-            if (e.Key == VirtualKey.Escape) Refresh(true);
-            if (e.Key != VirtualKey.Enter) return;
-            e.Handled = true;
-            await Submit(address.Text);
+            if (AddressEditor is { } editor) editor.MaxLength = 8192;
         };
+        address.KeyDown += (_, e) => { if (e.Key == VirtualKey.Escape) Refresh(true); };
+        address.TextChanged += (box, e) =>
+        {
+            if (e.Reason != AutoSuggestionBoxTextChangeReason.UserInput) return;
+            var query = box.Text.Trim();
+            List<string>? matches = null;
+            if (query.Length > 0 && ActiveTab is { Private: false })
+                Save(() => matches = store.Suggest(query));
+            box.ItemsSource = matches;
+        };
+        address.QuerySubmitted += async (_, e) => await Submit(e.ChosenSuggestion as string ?? e.QueryText);
         startSearch.QuerySubmitted += async (_, e) => await Submit(e.QueryText);
         Shortcut(VirtualKey.L, FocusAddress);
         Shortcut(VirtualKey.T, () => AddTab(focus: true));
+        Shortcut(VirtualKey.N, () => app.OpenWindow());
         Shortcut(VirtualKey.W, () => { if (ActiveTab is { } tab) CloseTab(tab); });
         Shortcut(VirtualKey.Tab, () => Switch(1));
         Shortcut(VirtualKey.Tab, () => Switch(-1), VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift);
@@ -158,7 +204,6 @@ sealed partial class Browser
         var systemColors = new UISettings();
         var dragRect = new RectInt32();
         root.LayoutUpdated += UpdateDragArea;
-        window.Closing += (_, _) => root.LayoutUpdated -= UpdateDragArea;
         appearance.Changed += AppearanceChanged;
         Closed += (_, _) =>
         {
@@ -170,7 +215,11 @@ sealed partial class Browser
             root.XamlRoot.Changed += (_, _) => CaptionInset();
             CaptionInset();
             UpdateTheme();
-            DispatcherQueue.TryEnqueue(FocusNewTab);
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                LoadSelected();
+                if (ActiveTab is { Url: null }) FocusNewTab();
+            });
         };
         root.SizeChanged += (_, _) => CaptionInset();
         root.ActualThemeChanged += (_, _) => UpdateTheme();
@@ -201,8 +250,11 @@ sealed partial class Browser
             var width = Math.Max(0, window.ClientSize.Width - caption.RightInset - left);
             var bounds = new RectInt32(left, 0, width, (int)Math.Round(tabs.Height * scale));
             if (bounds.Equals(dragRect)) return;
+            // TabView maintains a separate caption region for native tab tear-out.
+            var regions = nonClient.GetRegionRects(NonClientRegionKind.Caption).Where(rect => !rect.Equals(dragRect)).ToList();
+            if (width > 0) regions.Add(bounds);
             dragRect = bounds;
-            nonClient.SetRegionRects(NonClientRegionKind.Caption, width == 0 ? [] : [bounds]);
+            nonClient.SetRegionRects(NonClientRegionKind.Caption, regions.ToArray());
         }
     }
 
@@ -287,13 +339,19 @@ sealed partial class Browser
 
     void Refresh(bool updateAddress = false)
     {
+        if (closed) return;
         var tab = ActiveTab;
-        if (updateAddress) address.Text = tab?.Url?.AbsoluteUri ?? "";
+        if (updateAddress)
+        {
+            address.ItemsSource = null;
+            address.Text = tab?.Url?.AbsoluteUri ?? "";
+        }
         var privateMode = tab?.Private == true;
         privateLabel.Visibility = privateMode ? Visibility.Visible : Visibility.Collapsed;
         privateMark.Visibility = privateMode ? Visibility.Visible : Visibility.Collapsed;
         wordmark.Visibility = privateMode ? Visibility.Collapsed : Visibility.Visible;
         startPage.Visibility = tab is { Url: null, Loading: false } ? Visibility.Visible : Visibility.Collapsed;
+        ShowZoom(tab);
         back.IsEnabled = tab?.Core?.CanGoBack == true;
         forward.IsEnabled = tab?.Core?.CanGoForward == true;
         reload.IsEnabled = tab?.Url is not null || tab?.Loading == true;
@@ -306,8 +364,9 @@ sealed partial class Browser
 
     void FocusAddress()
     {
-        address.Focus(FocusState.Programmatic);
-        address.SelectAll();
+        if (AddressEditor is not { } editor) return;
+        editor.Focus(FocusState.Programmatic);
+        editor.SelectAll();
     }
 
     void FocusNewTab()

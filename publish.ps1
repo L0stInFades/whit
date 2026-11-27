@@ -1,5 +1,5 @@
 param(
-    [version]$Version = '1.0.4.0',
+    [version]$Version = '1.0.5.0',
     [Parameter(Mandatory)][ValidatePattern('^[0-9A-Fa-f]{40}$')][string]$Thumbprint,
     [uri]$Timestamp,
     [string]$Output = "$PSScriptRoot/dist"

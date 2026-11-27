@@ -3,24 +3,54 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.Web.WebView2.Core;
+using Windows.ApplicationModel;
 
 namespace Whit;
 
 sealed partial class Browser
 {
-    CoreWebView2TrackingPreventionLevel TrackingLevel => strict
+    CoreWebView2TrackingPreventionLevel TrackingLevel => app.Strict
         ? CoreWebView2TrackingPreventionLevel.Strict : CoreWebView2TrackingPreventionLevel.Balanced;
 
     MenuFlyout Menu()
     {
         var menu = new MenuFlyout();
+        Add("新窗口", "\uE8A7", () => { app.OpenWindow(); return Task.CompletedTask; });
         Add("隐私标签", Shield, () => { AddTab(isPrivate: true, focus: true); return Task.CompletedTask; });
+        var move = new MenuFlyoutSubItem { Text = "移动当前标签", Icon = Icon("\uE8AB") };
+        menu.Items.Add(move);
         menu.Items.Add(new MenuFlyoutSeparator());
         Add("书签", "\uE734", () => Library(true));
         Add("历史", "\uE81C", () => Library(false));
         Add("下载", "\uE896", Downloads);
         menu.Items.Add(new MenuFlyoutSeparator());
+        var search = new MenuFlyoutSubItem { Icon = Icon(Search) };
+        for (var i = 0; i < SearchEngines.Length; i++)
+        {
+            var index = i;
+            var engine = new RadioMenuFlyoutItem { Text = SearchEngines[i].Name, GroupName = "SearchEngine" };
+            engine.Click += (_, _) =>
+            {
+                if (app.SearchEngine != index && Save(() => store.SetSearchEngine(index)))
+                    app.SearchEngine = index;
+            };
+            search.Items.Add(engine);
+        }
+        menu.Opening += (_, _) =>
+        {
+            FillMoveMenu(move);
+            var engine = (RadioMenuFlyoutItem)search.Items[app.SearchEngine];
+            search.Text = $"搜索引擎（{engine.Text}）";
+            engine.IsChecked = true;
+        };
+        menu.Items.Add(search);
+        Add("设为默认浏览器", "\uE774", async () =>
+        {
+            var appId = Package.Current.Id.FamilyName + "!App";
+            await Windows.System.Launcher.LaunchUriAsync(new Uri("ms-settings:defaultapps?registeredAUMID=" + Uri.EscapeDataString(appId)));
+        });
         Add("隐私与安全", "\uE72E", Privacy);
+        Add("退出", "\uE8BB", () => { app.Quit(this); return Task.CompletedTask; });
         return menu;
 
         void Add(string label, string icon, Func<Task> run)
@@ -33,7 +63,7 @@ sealed partial class Browser
 
     void RefreshBookmark()
     {
-        star.IsEnabled = ActiveTab is { Private: false, Url: not null };
+        star.IsEnabled = ActiveTab is { Private: false } tab && SavedUrl(tab.Url) is not null;
         var saved = false;
         if (star.IsEnabled) Save(() => saved = store.Bookmarked(ActiveTab!.Url!.AbsoluteUri));
         Glyph(star, saved ? "\uE735" : "\uE734", saved ? "移除书签" : "添加书签");
@@ -41,7 +71,7 @@ sealed partial class Browser
 
     void ToggleBookmark()
     {
-        if (ActiveTab is not { Private: false, Url: { } uri } tab) return;
+        if (ActiveTab is not { Private: false } tab || SavedUrl(tab.Url) is not { } uri) return;
         var url = uri.AbsoluteUri;
         Save(() =>
         {
@@ -104,11 +134,12 @@ sealed partial class Browser
             if (next.IsEnabled) nextCursor = pages[39].Id;
             foreach (var page in pages.Take(40))
             {
-                var url = WebUrl(page.Url);
+                var url = SavedUrl(DocumentUrl(page.Url));
                 if (url is null) continue;
-                var label = page.Title.Length == 0 ? url.Host : page.Title;
-                var details = bookmarks ? url.IdnHost :
-                    $"{url.IdnHost}   {DateTimeOffset.FromUnixTimeSeconds(page.Stamp).ToLocalTime():g}";
+                var site = url.IsFile ? url.LocalPath : url.IdnHost;
+                var label = page.Title.Length == 0 ? site : page.Title;
+                var details = bookmarks ? site :
+                    $"{site}   {DateTimeOffset.FromUnixTimeSeconds(page.Stamp).ToLocalTime():g}";
                 var text = new StackPanel();
                 text.Children.Add(new TextBlock { Text = label, TextTrimming = TextTrimming.CharacterEllipsis });
                 text.Children.Add(new TextBlock
@@ -172,8 +203,8 @@ sealed partial class Browser
     async Task Privacy()
     {
         if (dialog is not null) return;
-        var https = new ToggleSwitch { Header = "仅 HTTPS 导航", IsOn = httpsOnly, OnContent = "开", OffContent = "关" };
-        var tracking = new ToggleSwitch { Header = "严格防跟踪", IsOn = strict, OnContent = "开", OffContent = "关" };
+        var https = new ToggleSwitch { Header = "仅 HTTPS 导航", IsOn = app.HttpsOnly, OnContent = "开", OffContent = "关" };
+        var tracking = new ToggleSwitch { Header = "严格防跟踪", IsOn = app.Strict, OnContent = "开", OffContent = "关" };
         var wipe = new Button { Content = "清除浏览数据" };
         var permissions = new Button { Content = "重置站点权限" };
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -194,11 +225,12 @@ sealed partial class Browser
         if (await Show(panel) == ContentDialogResult.Primary &&
             Save(() => store.SetPrivacy(https.IsOn, tracking.IsOn)))
         {
-            httpsOnly = https.IsOn;
-            strict = tracking.IsOn;
+            app.HttpsOnly = https.IsOn;
+            app.Strict = tracking.IsOn;
             try
             {
-                foreach (var tab in documents.Values)
+                foreach (var window in app.Windows)
+                foreach (var tab in window.documents.Values)
                     if (tab.Core is { } web) web.Profile.PreferredTrackingPreventionLevel = TrackingLevel;
             }
             catch (Exception) { Note("防跟踪设置将在下次打开时生效"); }
@@ -219,8 +251,8 @@ sealed partial class Browser
             Title = "清除浏览数据？", Content = "历史、下载记录、缓存和站点数据",
             PrimaryButtonText = "清除", CloseButtonText = "取消",
         };
-        if (await Show(prompt) != ContentDialogResult.Primary || clearing) return;
-        clearing = true;
+        if (await Show(prompt) != ContentDialogResult.Primary || app.Clearing || closed) return;
+        app.Clearing = true;
         try
         {
             if (await RegularProfile() is not { } profile) return;
@@ -230,7 +262,7 @@ sealed partial class Browser
             if (Save(store.ClearHistory)) Note("浏览数据已清除");
         }
         catch (Exception) { Note("浏览数据清除失败"); }
-        finally { clearing = false; }
+        finally { app.Clearing = false; }
     }
 
     async Task ClearPermissions()

@@ -6,6 +6,8 @@ sealed partial class Store : IDisposable
 {
     readonly nint db;
     public readonly record struct Page(long Id, string Url, string Title, long Stamp);
+    public const int MaxIconBytes = 16 * 1024;
+    public readonly record struct SessionTab(int Window, string Url, string Title, bool Selected, byte[]? Icon);
 
     public Store(string path)
     {
@@ -23,10 +25,15 @@ sealed partial class Store : IDisposable
                     id INTEGER PRIMARY KEY, url TEXT NOT NULL, title TEXT NOT NULL, stamp INTEGER NOT NULL);
                 CREATE TABLE IF NOT EXISTS settings(
                     key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;
+                CREATE TABLE IF NOT EXISTS session(
+                    id INTEGER PRIMARY KEY, window_id INTEGER NOT NULL,
+                    url TEXT NOT NULL, title TEXT NOT NULL, selected INTEGER NOT NULL);
                 CREATE TRIGGER IF NOT EXISTS trim_history AFTER INSERT ON history BEGIN
                     DELETE FROM history WHERE id <= NEW.id - 50000;
                 END;
                 """, 0, 0, 0));
+            if (Scalar("SELECT COUNT(*) FROM pragma_table_info('session') WHERE name=?1", "icon") == 0)
+                Write("ALTER TABLE session ADD COLUMN icon BLOB");
         }
         catch
         {
@@ -35,8 +42,9 @@ sealed partial class Store : IDisposable
         }
     }
 
-    public bool Setting(string key) => Scalar("SELECT value FROM settings WHERE key=?1", key);
-    public bool Bookmarked(string url) => Scalar("SELECT 1 FROM bookmarks WHERE url=?1", url);
+    public long Setting(string key) => Scalar("SELECT value FROM settings WHERE key=?1", key);
+    public bool Bookmarked(string url) => Scalar("SELECT 1 FROM bookmarks WHERE url=?1", url) != 0;
+    public void SetSearchEngine(int index) => Write("INSERT OR REPLACE INTO settings VALUES('search',?1)", (long)index);
     public void SetPrivacy(bool https, bool strict) =>
         Write("INSERT OR REPLACE INTO settings VALUES('https',?1),('strict',?2)", https ? 1L : 0L, strict ? 1L : 0L);
     public void Bookmark(string url, string title) =>
@@ -74,14 +82,79 @@ sealed partial class Store : IDisposable
         return pages;
     }
 
+    public List<string> Suggest(string search)
+    {
+        const int limit = 8;
+        var urls = new List<string>(limit);
+        foreach (var table in new[] { "bookmarks", "history" })
+        {
+            var statement = Prepare($"""
+                SELECT url FROM {table} WHERE instr(lower(title),lower(?1)) OR instr(lower(url),lower(?1))
+                ORDER BY id DESC
+                """, search);
+            try
+            {
+                while (urls.Count < limit && Step(statement))
+                {
+                    var url = Text(statement, 0);
+                    if (!urls.Contains(url)) urls.Add(url);
+                }
+            }
+            finally { sqlite3_finalize(statement); }
+            if (urls.Count == limit) break;
+        }
+        return urls;
+    }
+
+    public List<SessionTab> Session()
+    {
+        var statement = Prepare("SELECT window_id,url,title,selected,icon FROM session ORDER BY id");
+        var tabs = new List<SessionTab>();
+        try
+        {
+            while (Step(statement))
+                tabs.Add(new((int)sqlite3_column_int64(statement, 0), Text(statement, 1),
+                    Text(statement, 2), sqlite3_column_int64(statement, 3) != 0, IconBytes(statement, 4)));
+        }
+        finally { sqlite3_finalize(statement); }
+        return tabs;
+    }
+
+    public void SetSession(IEnumerable<SessionTab> tabs)
+    {
+        Write("BEGIN");
+        try
+        {
+            Write("DELETE FROM session");
+            foreach (var tab in tabs)
+                Write("INSERT INTO session(window_id,url,title,selected,icon) VALUES(?1,?2,?3,?4,?5)",
+                    (long)tab.Window, tab.Url, tab.Title, tab.Selected ? 1L : 0L, tab.Icon ?? Array.Empty<byte>());
+            Write("COMMIT");
+        }
+        catch
+        {
+            Write("ROLLBACK");
+            throw;
+        }
+    }
+
     static long Now() => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     static string Text(nint statement, int column) =>
         Marshal.PtrToStringUTF8(sqlite3_column_text(statement, column)) ?? "";
 
-    bool Scalar(string sql, string key)
+    static byte[]? IconBytes(nint statement, int column)
+    {
+        var size = sqlite3_column_bytes(statement, column);
+        if (size is <= 0 or > MaxIconBytes) return null;
+        var bytes = new byte[size];
+        Marshal.Copy(sqlite3_column_blob(statement, column), bytes, 0, size);
+        return bytes;
+    }
+
+    long Scalar(string sql, string key)
     {
         var statement = Prepare(sql, key);
-        try { return Step(statement) && sqlite3_column_int64(statement, 0) != 0; }
+        try { return Step(statement) ? sqlite3_column_int64(statement, 0) : 0; }
         finally { sqlite3_finalize(statement); }
     }
 
@@ -98,9 +171,12 @@ sealed partial class Store : IDisposable
         try
         {
             for (var i = 0; i < values.Length; i++)
-                Check(values[i] is string text
-                    ? sqlite3_bind_text(statement, i + 1, text, -1, -1)
-                    : sqlite3_bind_int64(statement, i + 1, (long)values[i]));
+                Check(values[i] switch
+                {
+                    string text => sqlite3_bind_text(statement, i + 1, text, -1, -1),
+                    byte[] bytes => sqlite3_bind_blob(statement, i + 1, bytes, bytes.Length, -1),
+                    _ => sqlite3_bind_int64(statement, i + 1, (long)values[i]),
+                });
             return statement;
         }
         catch
@@ -137,5 +213,8 @@ sealed partial class Store : IDisposable
     [LibraryImport(Sqlite)] private static partial int sqlite3_finalize(nint statement);
     [LibraryImport(Sqlite)] private static partial long sqlite3_column_int64(nint statement, int index);
     [LibraryImport(Sqlite)] private static partial nint sqlite3_column_text(nint statement, int index);
+    [LibraryImport(Sqlite)] private static partial nint sqlite3_column_blob(nint statement, int index);
+    [LibraryImport(Sqlite)] private static partial int sqlite3_column_bytes(nint statement, int index);
+    [LibraryImport(Sqlite)] private static partial int sqlite3_bind_blob(nint statement, int index, byte[] bytes, int size, nint destructor);
     [LibraryImport(Sqlite)] private static partial nint sqlite3_errmsg(nint db);
 }

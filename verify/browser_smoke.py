@@ -1,6 +1,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from urllib.parse import parse_qs, urlsplit
 import json
 import os
 import sqlite3
@@ -42,6 +43,11 @@ class Site(BaseHTTPRequestHandler):
         hits.append((name, self.headers.get("Cookie", "")))
         body = ("<!doctype html><title>whit " + name + "</title>"
                 "<a target='_blank' href='popup'>弹出标签</a>").encode()
+        if name == "flow":
+            body = b"<title>whit flow</title><script>setTimeout(() => open('async'), 100)</script>"
+        elif name == "async":
+            body = b"""<title>whit async</title>
+                <button onclick="opener.document.title='whit callback'; window.close()">Done</button>"""
         if name == "download":
             body = b"whit. download test"
         self.send_response(200)
@@ -63,9 +69,8 @@ def rows(query, *args):
 
 
 def element(name=None, kind=None, auto_id=None):
-    found = win.descendants(control_type=kind)
-    return next((item for item in found if (name is None or item.element_info.name == name)
-                 and (auto_id is None or item.element_info.automation_id == auto_id)), None)
+    found = win.descendants(title=name, control_type=kind)
+    return next((item for item in found if auto_id is None or item.element_info.automation_id == auto_id), None)
 
 
 def click(name=None, kind="Button", **criteria):
@@ -90,34 +95,52 @@ def close():
     assert proc.returncode == 0, proc.returncode
 
 
-def launch():
+def launch(*args):
     global proc, hwnd, win
-    proc = subprocess.Popen([str(exe)])
-    hwnd = until(lambda: next((h for h in collect(proc.pid) if text(h) == "whit."), 0), "MSIX launch")
-    win = Desktop(backend="uia").window(handle=hwnd)
+    proc = subprocess.Popen([str(exe), *args])
+    attach(until(lambda: next(iter(windows()), None), "MSIX launch"))
     until(lambda: element(kind="Edit"), "address box")
 
 
+def windows():
+    return [h for h in collect(proc.pid) if text(h) == "whit."]
+
+
+def attach(handle):
+    global hwnd, win
+    hwnd = handle
+    win = Desktop(backend="uia").window(handle=hwnd)
+
+
+def press_key(code, scan):
+    target = until(lambda: next((h for h in collect(parent=hwnd)
+                   if window_class(h) == "InputSiteWindowClass"), None), "keyboard site")
+    assert user.PostMessageW(target, 0x100, code, (scan << 16) | 1)
+    assert user.PostMessageW(target, 0x101, code, 0xC0000000 | (scan << 16) | 1)
+
+
 def enter(url, editor="地址", submit=False):
+    box = fill(url, editor)
+    if not submit:
+        press_key(13, 0x1C)
+        return
+    automation = IUIA()
+    client = automation.ui_automation_client
+    walker = automation.iuia.RawViewWalker
+    query = walker.GetFirstChildElement(box.element_info.element)
+    while query and query.CurrentAutomationId != "QueryButton":
+        query = walker.GetNextSiblingElement(query)
+    assert query, "native query button"
+    query.GetCurrentPattern(client.UIA_InvokePatternId).QueryInterface(client.IUIAutomationInvokePattern).Invoke()
+
+
+def fill(url, editor="地址"):
     box = until(lambda: element(editor, "Edit"), editor)
     box.element_info.element.SetFocus()
     box.iface_value.SetValue(url)
     until(lambda: box.element_info.element.CurrentHasKeyboardFocus and box.get_value() == url,
           "editor focus and text")
-    if submit:
-        automation = IUIA()
-        client = automation.ui_automation_client
-        walker = automation.iuia.RawViewWalker
-        query = walker.GetFirstChildElement(box.element_info.element)
-        while query and query.CurrentAutomationId != "QueryButton":
-            query = walker.GetNextSiblingElement(query)
-        assert query, "native query button"
-        query.GetCurrentPattern(client.UIA_InvokePatternId).QueryInterface(client.IUIAutomationInvokePattern).Invoke()
-        return
-    target = until(lambda: next((h for h in collect(parent=hwnd)
-                   if window_class(h) == "InputSiteWindowClass"), None), "keyboard site")
-    assert user.PostMessageW(target, 0x100, 13, 0x001C0001)
-    assert user.PostMessageW(target, 0x101, 13, 0xC01C0001)
+    return box
 
 
 def title(path):
@@ -126,6 +149,21 @@ def title(path):
 
 def address(expected):
     until(lambda: (box := element("地址", "Edit") or element(kind="Edit")) and box.get_value() == expected, expected)
+
+
+def search_address(search_url, query):
+    target = urlsplit(search_url)
+    hosts = {target.netloc, "cn.bing.com"} if target.netloc == "www.bing.com" else {target.netloc}
+
+    def matches():
+        box = element("地址", "Edit")
+        if box is None:
+            return False
+        url = urlsplit(box.get_value())
+        return (url.scheme == target.scheme and url.netloc in hosts and url.path == target.path
+                and parse_qs(url.query).get(target.query[:-1]) == [query])
+
+    until(matches, search_url)
 
 
 def browser():
@@ -200,6 +238,7 @@ def browser():
     menu("隐私与安全")
     toggle("仅 HTTPS 导航")
     click("保存")
+    until(lambda: rows("SELECT value FROM settings WHERE key='https'") == [(0,)], "HTTPS setting reset")
     menu("隐私与安全")
     click("清除浏览数据")
     click("清除")
@@ -237,15 +276,82 @@ def storage():
     click("关闭")
 
 
+def workflow():
+    launch(base + "/cold")
+    title("cold")
+    subprocess.run([str(exe), base + "/warm"], check=True, timeout=8)
+    title("warm")
+    address(base + "/warm")
+    enter(base + "/flow")
+    title("async")
+    click("Done")
+    title("callback")
+    until(lambda: not element("whit async", "TabItem"), "script closed its popup")
+    fill("whit a")
+    suggestion = until(lambda: element(base + "/a", "ListItem"), "bookmark suggestion by title")
+    suggestion.iface_invoke.Invoke()
+    address(base + "/a")
+    fill("whit warm")
+    until(lambda: element(base + "/warm", "ListItem"), "history suggestion by title")
+
+    query = "whit smoke"
+    current = "Google"
+    for engine, search_url in [
+        (None, "https://www.google.com/search?q="),
+        ("Bing", "https://www.bing.com/search?q="),
+        ("Baidu", "https://www.baidu.com/s?wd="),
+        ("Google", "https://www.google.com/search?q="),
+        ("DuckDuckGo", "https://duckduckgo.com/?q="),
+    ]:
+        if engine:
+            click("菜单")
+            label = f"搜索引擎（{current}）"
+            until(lambda: element(label, "MenuItem"), label).iface_expand_collapse.Expand()
+            choices = [until(lambda: element(name, "MenuItem"), name)
+                       for name in ("Google", "Bing", "Baidu", "DuckDuckGo")]
+            assert [item.element_info.name for item in choices if item.iface_toggle.CurrentToggleState == 1] == [current]
+            until(lambda: element(engine, "MenuItem"), engine).iface_toggle.Toggle()
+            current = engine
+        enter(query)
+        search_address(search_url, query)
+
+    enter(base + "/first-window")
+    title("first-window")
+    first = hwnd
+    menu("新窗口")
+    attach(until(lambda: next((h for h in windows() if h != first), None), "second window"))
+    enter(base + "/second-window", "新标签搜索")
+    title("second-window")
+    menu("退出")
+    assert proc.wait(timeout=8) == 0
+    assert rows("SELECT url FROM session WHERE selected=1 ORDER BY window_id") == [
+        (base + "/first-window",), (base + "/second-window",)]
+
+    launch()
+    restored = until(lambda: windows() if len(windows()) == 2 else None, "two restored windows")
+    selected = set()
+    for handle in restored:
+        attach(handle)
+        selected.add(until(lambda: (box := element("地址", "Edit")) and box.get_value(), "restored address"))
+    assert selected == {base + "/first-window", base + "/second-window"}
+    enter(query)
+    search_address("https://duckduckgo.com/?q=", query)
+    click("菜单")
+    until(lambda: element("搜索引擎（DuckDuckGo）", "MenuItem"), "saved search engine label")
+    click("退出", "MenuItem")
+    assert proc.wait(timeout=8) == 0
+    print("suggestions, four search engines, launch arguments, two-window session", flush=True)
+
+
 if __name__ == "__main__":
+    os.environ.setdefault("WHIT_TEST_PACKAGE", "whit.browser")
     package = json.loads(subprocess.check_output(
         ["pwsh", "-NoProfile", "-Command",
-         "Get-AppxPackage whit.browser | Select-Object PackageFamilyName,InstallLocation | ConvertTo-Json -Compress"],
+         "Get-AppxPackage -Name $env:WHIT_TEST_PACKAGE | Select-Object PackageFamilyName,InstallLocation | ConvertTo-Json -Compress"],
         text=True))
     exe = Path(package["InstallLocation"]) / "whit.exe"
     db = Path(os.environ["LOCALAPPDATA"]) / "Packages" / package["PackageFamilyName"] / "LocalState" / "whit.db"
     assert not db.exists(), "Install a fresh test package before running the destructive privacy test."
-    assert not any(text(h) == "whit." for h in collect()), "Close whit. before testing."
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                         r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as key:
         value = winreg.QueryValueEx(key, "{374DE290-123F-4565-9164-39C4925E467B}")[0]
@@ -257,8 +363,12 @@ if __name__ == "__main__":
     try:
         browser()
         storage()
+        close()
+        workflow()
     finally:
         if proc and proc.poll() is None:
-            close() if "hwnd" in globals() else proc.terminate()
+            for handle in windows():
+                user.PostMessageW(handle, 0x10, 0, 0)
+            proc.wait(timeout=8)
         download.unlink(missing_ok=True)
         server.shutdown()

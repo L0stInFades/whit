@@ -3,7 +3,7 @@
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
          IgnorableNamespaces="uap rescap">
-  <Identity Name="whit.browser" Publisher="CN=whit." Version="1.0.4.0" ProcessorArchitecture="x64" />
+  <Identity Name="whit.browser" Publisher="CN=whit." Version="1.0.5.0" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>whit.</DisplayName>
     <PublisherDisplayName>whit.</PublisherDisplayName>
@@ -19,6 +19,10 @@
     <Application Id="App" Executable="whit.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements DisplayName="whit." Description="whit." BackgroundColor="transparent"
                           Square44x44Logo="Assets\Logo44.png" Square150x150Logo="Assets\Logo150.png" />
+      <Extensions>
+        <uap:Extension Category="windows.protocol"><uap:Protocol Name="http" /></uap:Extension>
+        <uap:Extension Category="windows.protocol"><uap:Protocol Name="https" /></uap:Extension>
+      </Extensions>
     </Application>
   </Applications>
   <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>

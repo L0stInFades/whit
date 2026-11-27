@@ -43,7 +43,9 @@ def check_strip(tab_count):
             return None
         if any(hit(x, y) != 2 for x in (add.right + 6, drag[0], minimize.left - 6)):
             return None
-        for area in (tab, add, editor):
+        if hit(tab.mid_point().x, tab.mid_point().y) != 2:
+            return None
+        for area in (add, editor):
             center = area.mid_point()
             if hit(center.x, center.y) != 1:
                 return None
@@ -94,6 +96,9 @@ if __name__ == "__main__":
         check_strip(4)
         browser.close()
         browser.launch()
+        check_strip(4)
+        for _ in range(3):
+            browser.click(auto_id="CloseButton")
         browser.click(auto_id="CloseButton")
         assert browser.proc.wait(timeout=8) == 0
         print("Caption drag zone, native maximize/restore and interactive tabs at both widths.")
